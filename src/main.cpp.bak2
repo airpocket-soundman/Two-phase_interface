@@ -9,15 +9,6 @@
 #include <OutputMixer.h>
 #include <MemoryUtil.h>
 #include <math.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ILI9341.h>
-
-// ======= ILI9341 SPI接続ピン定義 =======
-#define TFT_CS   10   // Chip Select
-#define TFT_DC   9    // Data/Command
-#define TFT_RST  8    // Reset（必要なければ省略可）
-
-Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 
 const int MIXER_VOLUME = -160;
 const int32_t S_BUFFER_SIZE = 8192;
@@ -27,8 +18,8 @@ bool err_flag = false;
 // ======= 波形パラメータ =======
 const float SAMPLE_RATE = 48000.0f;
 float freq = 440.0f;          // 初期周波数(Hz)
-int volume = 50;              // 0〜100%
-int amplitude = 0;            // 0〜32767
+int volume = 50;              // 抽象化したボリューム値(0〜100)
+int amplitude = 0;            // 実際のPCM振幅(0〜32767)
 float phase = 0.0f;
 const float PI2 = 6.2831853f;
 
@@ -37,14 +28,14 @@ MediaPlayer *player;
 OutputMixer *mixer;
 
 // ======= 入力ピン設定 =======
-const int POT_FREQ = A0;
-const int POT_VOL  = A1;
+const int POT_FREQ = A0;         // 周波数制御用
+const int POT_VOL  = A1;         // ボリューム制御用
 const float FREQ_MIN = 1.0f;
 const float FREQ_MAX = 1000.0f;
-const int ADC_FREQ_MIN = 30;
-const int ADC_FREQ_MAX = 610;
-const int ADC_VOL_MIN  = 30;
-const int ADC_VOL_MAX  = 610;
+const int ADC_FREQ_MIN = 10;     // 周波数入力範囲下限
+const int ADC_FREQ_MAX = 620;    // 周波数入力範囲上限
+const int ADC_VOL_MIN  = 10;     // ボリューム入力範囲下限
+const int ADC_VOL_MAX  = 620;    // ボリューム入力範囲上限
 
 // ======= コールバック =======
 static void error_callback(const ErrorAttentionParam *errparam)
@@ -72,25 +63,27 @@ static bool player_done_callback(AsPlayerEvent event, uint32_t result, uint32_t 
   return true;
 }
 
-// ======= 波形生成 =======
+// ======= 波形生成関数 =======
 void generate_sine(int16_t *buf, uint32_t frames)
 {
-  amplitude = (int)(32767.0f * (volume / 100.0f));
+  amplitude = (int)(32767.0f * (volume / 100.0f)); // 0〜100を0〜32767に変換
   float phase_inc = PI2 * freq / SAMPLE_RATE;
+
   for (uint32_t i = 0; i < frames; i++) {
     int16_t v = (int16_t)(sin(phase) * amplitude);
-    buf[i * 2 + 0] = v;
-    buf[i * 2 + 1] = v;
+    buf[i * 2 + 0] = v; // Left
+    buf[i * 2 + 1] = v; // Right
     phase += phase_inc;
     if (phase >= PI2) phase -= PI2;
   }
 }
 
-// ======= PCMコールバック =======
+// ======= PCMデコードコールバック =======
 void player_decode_callback(AsPcmDataParam pcm_param)
 {
   int16_t *buf = (int16_t*)pcm_param.mh.getPa();
   uint32_t frames = pcm_param.size / 4;
+
   generate_sine(buf, frames);
   mixer->sendData(OutputMixer0, mixer_send_callback, pcm_param);
 }
@@ -99,20 +92,11 @@ void player_decode_callback(AsPcmDataParam pcm_param)
 void setup()
 {
   Serial.begin(115200);
+  Serial.println("=== Spresense: Sine Generator (Freq=A0, Volume=A1, 0〜100抽象化) ===");
+  Serial.println("A0: 周波数 30〜610 → 1〜1000Hz");
+  Serial.println("A1: ボリューム 30〜610 → 0〜100");
+  Serial.println("音量は内部的に 0〜32767 の16bit PCM振幅に変換されます。");
 
-  // --- TFT 初期化 ---
-  tft.begin();
-  tft.setRotation(1); // 横向き
-  tft.fillScreen(ILI9341_BLACK);
-  tft.setTextColor(ILI9341_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(20, 20);
-  tft.println("Spresense Sine Generator");
-  tft.setTextSize(2);
-  tft.setCursor(20, 50);
-  tft.println("Initializing audio...");
-
-  // --- Audio初期化 ---
   initMemoryPools();
   createStaticPools(MEM_LAYOUT_PLAYER);
 
@@ -136,8 +120,8 @@ void setup()
   player->writeFrames(MediaPlayer::Player0, s_buffer, S_BUFFER_SIZE);
   player->start(MediaPlayer::Player0, player_decode_callback);
 
-  tft.fillScreen(ILI9341_BLACK);
   Serial.println("[OK] Audio initialized.");
+  Serial.println("----------------------------------------------");
 }
 
 // ======= メインループ =======
@@ -145,59 +129,36 @@ void loop()
 {
   player->writeFrames(MediaPlayer::Player0, s_buffer, S_BUFFER_SIZE);
 
-  // --- 周波数制御 ---
+  // === 周波数制御 ===
   int rawFreq = analogRead(POT_FREQ);
-  if (rawFreq <= ADC_FREQ_MIN) freq = FREQ_MIN;
-  else if (rawFreq >= ADC_FREQ_MAX) freq = FREQ_MAX;
-  else freq = FREQ_MIN + (FREQ_MAX - FREQ_MIN) *
-              ((float)(rawFreq - ADC_FREQ_MIN) / (ADC_FREQ_MAX - ADC_FREQ_MIN));
+  float newFreq;
+  if (rawFreq <= ADC_FREQ_MIN) newFreq = FREQ_MIN;
+  else if (rawFreq >= ADC_FREQ_MAX) newFreq = FREQ_MAX;
+  else newFreq = FREQ_MIN + (FREQ_MAX - FREQ_MIN) *
+                ((float)(rawFreq - ADC_FREQ_MIN) / (ADC_FREQ_MAX - ADC_FREQ_MIN));
+  freq = newFreq;
 
-  // --- ボリューム制御 ---
+  // === ボリューム制御 ===
   int rawVol = analogRead(POT_VOL);
-  if (rawVol <= ADC_VOL_MIN) volume = 0;
-  else if (rawVol >= ADC_VOL_MAX) volume = 100;
-  else volume = (int)(100.0f * (float)(rawVol - ADC_VOL_MIN) / (ADC_VOL_MAX - ADC_VOL_MIN));
+  int newVol;
+  if (rawVol <= ADC_VOL_MIN) newVol = 0;
+  else if (rawVol >= ADC_VOL_MAX) newVol = 100;
+  else newVol = (int)(100.0f * (float)(rawVol - ADC_VOL_MIN) / (ADC_VOL_MAX - ADC_VOL_MIN));
+  volume = newVol;
 
-  // --- 表示更新 ---
-  static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate > 200) {
-    lastUpdate = millis();
-
-    // シリアル出力
+  // === デバッグ出力 ===
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 100) {
+    lastPrint = millis();
     Serial.print("[A0]="); Serial.print(rawFreq);
     Serial.print("  [A1]="); Serial.print(rawVol);
     Serial.print("  ->  [freq]="); Serial.print(freq, 1);
     Serial.print(" Hz  [vol]="); Serial.print(volume);
-    Serial.print("%  [amp]="); Serial.println(amplitude);
-
-    // TFT出力
-    tft.fillRect(0, 0, 320, 240, ILI9341_BLACK);
-    tft.setCursor(20, 30);  tft.setTextSize(2);
-    tft.println("Spresense Sine Generator");
-
-    tft.setTextSize(2);
-    tft.setCursor(20, 80);
-    tft.printf("A0: %4d", rawFreq);
-    tft.setCursor(20, 110);
-    tft.printf("A1: %4d", rawVol);
-
-    tft.setCursor(20, 150);
-    tft.printf("Freq: %7.1f Hz", freq);
-
-    tft.setCursor(20, 180);
-    tft.printf("Vol:  %3d %%", volume);
-
-    tft.setCursor(20, 210);
-    tft.printf("Amp:  %5d", amplitude);
+    Serial.print("%  [amplitude]="); Serial.println(amplitude);
   }
 
   if (err_flag) {
     Serial.println("[ERROR] Audio system halted!");
-    tft.fillScreen(ILI9341_RED);
-    tft.setCursor(20, 120);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setTextSize(2);
-    tft.println("AUDIO SYSTEM HALTED");
     player->stop(MediaPlayer::Player0);
     while (1);
   }
