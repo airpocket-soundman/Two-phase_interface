@@ -16,7 +16,7 @@ const int DirPin   = 0;
 const int StepPin  = 1;
 const int EncA     = 2;
 const int EncB     = 3;
-const int HomePin  = 15;
+const int HomePin  = 4;
 
 // ===== モータパラメータ =====
 const int STEPS_PER_REV = 200 * 16;  // 1.8° × 1/16 = 3200 step/rev
